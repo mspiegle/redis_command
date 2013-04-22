@@ -1,0 +1,263 @@
+#!/bin/env bash
+# some core functions
+function die {
+	echo "$1"
+	exit 1
+}
+
+# i use features that require a sufficiently recent version of bash
+if [[ !((${BASH_VERSINFO[0]} -ge 4) && (${BASH_VERSINFO[1]} -ge 1)) ]]; then
+	die "This script requires Bash-4.1 or newer"
+fi
+
+# configurables
+# how many commands do we need to run to realize PRECONNECT benefits?
+PRECONNECT_LIMIT=1
+
+# initialize a few things.  if you don't "declare -A", you can't use
+# associative arrays
+RES=''
+PARALLEL=0
+PRECONNECT=0
+PERSISTENT=1
+COMMANDS=0
+declare -a PIDS
+declare -a HOSTS
+declare -A SOCKETS
+declare -A OUTPUT
+
+# some more functions
+function handle_output {
+	# args: command response
+	# returns: only a return code, OUTPUT is populated
+	if [[ -z "$1" ]]; then
+		echo "Invalid command"
+		return 1
+	fi
+	local COMMAND="$1"
+	if [[ -z "$2" ]]; then
+		echo "Invalid response"
+		return 1
+	fi
+	local RESPONSE="$2"
+
+	# let's handle the special case of the 'info' command
+	# we're going to parse the entire info output blob into a nice
+	# associative array so we can print specific keys
+	# i'm not sure the best way to implement this, but here's a first stab
+	case "${COMMAND,,}" in
+		'info')
+			while read -r LINE; do
+				if [ -n "${LINE}" ]; then
+					# take key:value pairs of response output, and put them in an
+					# associative array
+					OUTPUT[${LINE%%:*}]=${LINE##*:}
+				fi
+			done <<< "${RESPONSE}"
+			;;
+		*)
+			# for everything else, just set the RESULT key
+			OUTPUT['RESULT']="${RESPONSE}"
+			;;
+	esac
+}
+
+function redis_command {
+	# args: <socket> <command>
+	# returns: the data fetched, or failure return code
+	local RESPONSE
+
+	# check args
+	if [[ ! -w "/dev/fd/$1" ]]; then
+		return 1
+	fi
+	local SOCK="$1"
+	if [[ -z "$2" ]]; then
+		return 1
+	fi
+	local COMMAND="$2"
+
+	# send the command
+	printf "%s\r\n" "${COMMAND}" >&${SOCK}
+	read -r -u ${SOCK} -t 1 RESPONSE
+
+	# the response contains a carriage return which causes issues, strip it
+	RESPONSE="${RESPONSE%?}"
+
+	# the first character of the response tells us lots...
+	case "${RESPONSE:0:1}" in
+		'+')
+			handle_output "${COMMAND}" "${RESPONSE:1}"
+			RET=0
+			;;
+
+		'-')
+			handle_output "${COMMAND}" "${RESPONSE:1}"
+			RET=1
+			;;
+
+		'$')
+			# it's a string response
+			local LEN="${RESPONSE:1}"
+			if [[ ${LEN} != ${LEN//[^0-9]/} ]]; then
+				RET=1
+			fi
+			# fetch the rest of the data
+			read -r -u ${SOCK} -t 1 -N ${LEN} RESPONSE
+
+			# the end of the info response has a trailing CRLF, yank it
+			read -r -u ${SOCK} -t 1 -N 2
+
+			# populate output response
+			handle_output "${COMMAND}" "${RESPONSE}"
+			RET=0
+			;;
+
+		':')
+			# handle integer response
+			echo "integer not implemented"
+			RET=1
+			;;
+		'*')
+			echo "multi-bulk replies not implemented"
+			RET=1
+			;;
+		*)
+			echo "Unknown response"
+			RET=1
+			;;
+
+	esac
+
+	# let's close the fd if we're not using persistent connections
+	if [[ ${PERSISTENT} -eq 0 ]]; then
+		eval "exec ${SOCK}<&-"
+		eval "exec ${SOCK}>&-"
+	fi
+
+	return ${RET}
+}
+
+function get_socket {
+	# args: <hostname> <port>
+	# returns: the socket number, or failure return code
+
+	# verify args
+	if [[ -z "${1}" ]]; then
+		return 1
+	fi
+	if [[ -z "${2}" ]]; then
+		return 1
+	fi
+
+	local HOSTPORT="${1}:${2}"
+	if [[ -z ${SOCKETS[${HOSTPORT}]} ]]; then
+		exec {fd}<>/dev/tcp/${1}/${2}
+		SOCKETS[${HOSTPORT}]=${fd}
+		RES=${fd}
+	else
+		RES="${SOCKETS[${HOSTPORT}]}"
+	fi
+}
+
+# catch no-arguments case
+if [ $# -lt 1 ]; then
+	die "Usage: $0 -X -c command -p print hostlist"
+fi
+
+# phase1: let's parse the commandline for special options
+OPTIND=1
+while getopts ':Xhc:p:' OPT; do
+	case "${OPT}" in
+		'h')
+			echo "Usage: $0 -X -c command -p print hostlist"
+			exit 0
+			;;
+		'X')
+			PARALLEL=1
+			;;
+		'c')
+			((COMMANDS++))
+			;;
+		'p')
+			# we'll worry about this in phase3
+			;;
+		*)
+			die "Usage: $0 -X -c command -p print hostlist"
+			;;
+	esac
+done
+
+# phase2: now we need to find all of the hosts in the commandline
+# they should be at the end
+ARGV=("$@")
+INDEX=$((OPTIND - 1))
+while [[ "${INDEX}" -lt $# ]]; do
+	if [[ "${ARGV[${INDEX}]}" =~ ^[a-Z0-9.-]+:[0-9]+$ ]]; then
+		HOSTS+=(${ARGV[${INDEX}]})
+	else
+		echo "[${ARGV[${INDEX}]}] is not in the form of <host>:<port>"
+	fi
+	((INDEX++))
+done
+if [[ "${#HOSTS[@]}" -lt 1 ]]; then
+	die "No hosts specified!"
+fi
+
+# phase2.5: preconnect to all hosts (if it makes sense) in an async way
+# don't do it if we're trying to talk to too many hosts, or are only sending
+# a single command.  also decide if we're going to use persistent connections
+# TODO: add some checking for hostnames which don't resolve
+ULIMIT_N="$(ulimit -n)"
+NEED_ULIMIT=$((${#HOSTS[@]} + 10))
+if [[ "${NEED_ULIMIT}" -gt "${ULIMIT_N}" ]]; then
+	echo "Warning: 'ulimit -n' is less than ${NEED_ULIMIT}," >&2
+	echo "disabling preconnect and persistent connections" >&2
+	PRECONNECT=0
+	PERSISTENT=0
+fi
+
+if [[ ${COMMANDS} -lt ${PRECONNECT_LIMIT} ]]; then
+	PRECONNECT=0
+fi
+
+if [[ ${PRECONNECT} -eq 1 ]]; then
+	echo -n "Pre-connecting to ${#HOSTS[@]} instances... " >&2
+	for HOST in ${HOSTS[@]}; do
+		get_socket "${HOST%%:*}" "${HOST##*:}" &
+		PIDS+=($!)
+	done
+
+	# make sure all of our async connections finished before starting
+	# TODO, check for errors
+	for PID in ${PIDS[@]}; do
+		wait ${PID}
+	done
+	echo "done" >&2
+fi
+
+# phase3: now the magic begins.  we will go through the commandline
+# options again. this time, ignoring options that we handled in phase1,
+# and handling things that were ignored in phase1
+for HOST in ${HOSTS[@]}; do
+	OPTIND=1
+	while getopts ':Xhc:p:' OPT; do
+		case "${OPT}" in
+			'h')
+				# ignoring as it was already handled above
+				;;
+			'X')
+				# ignoring as it was already handled above
+				;;
+			'c')
+				get_socket "${HOST%%:*}" "${HOST##*:}"
+				redis_command "${RES}" "${OPTARG}"
+				;;
+			'p')
+				echo "${HOST}: ${OUTPUT[${OPTARG}]}"
+				;;
+			*)
+				die "Usage: $0 -X -c command -p print hostlist"
+		esac
+	done
+done
