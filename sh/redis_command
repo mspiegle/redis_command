@@ -1,7 +1,7 @@
 #!/bin/env bash
 # some core functions
 function die {
-	echo "$1"
+	[ -n "$1" ] && echo "$1"
 	exit 1
 }
 
@@ -41,6 +41,11 @@ function handle_output {
 	fi
 	local RESPONSE="$2"
 
+	# i want to clear the OUTPUT array because it will persist results
+	# between subsequent commands which isn't desireable.  this looks dirty
+	# but it works for now
+	# ????
+
 	# let's handle the special case of the 'info' command
 	# we're going to parse the entire info output blob into a nice
 	# associative array so we can print specific keys
@@ -54,6 +59,8 @@ function handle_output {
 					OUTPUT[${LINE%%:*}]=${LINE##*:}
 				fi
 			done <<< "${RESPONSE}"
+			# we also set the RESULT key if you want to see everything
+			OUTPUT['RESULT']="${RESPONSE}"
 			;;
 		*)
 			# for everything else, just set the RESULT key
@@ -152,7 +159,7 @@ function get_socket {
 
 	local HOSTPORT="${1}:${2}"
 	if [[ -z ${SOCKETS[${HOSTPORT}]} ]]; then
-		exec {fd}<>/dev/tcp/${1}/${2}
+		exec {fd}<>/dev/tcp/${1}/${2} || return 1
 		SOCKETS[${HOSTPORT}]=${fd}
 		RES=${fd}
 	else
@@ -160,17 +167,25 @@ function get_socket {
 	fi
 }
 
+function usage {
+	echo "Usage: $0 -X -c command -[p|P] print hostlist"
+	echo "          You can use multiple '-c' commands"
+	echo "          '-p RESULT' shows the entire response, and is the default"
+	echo "          For 'info', '-p' can be passed keys from info response"
+	echo "          Using a '-P' omits the leading hostport on the line"
+}
+
 # catch no-arguments case
 if [ $# -lt 1 ]; then
-	die "Usage: $0 -X -c command -p print hostlist"
+	die
 fi
 
 # phase1: let's parse the commandline for special options
 OPTIND=1
-while getopts ':Xhc:p:' OPT; do
+while getopts ':Xhc:p:P:' OPT; do
 	case "${OPT}" in
 		'h')
-			echo "Usage: $0 -X -c command -p print hostlist"
+			usage
 			exit 0
 			;;
 		'X')
@@ -182,8 +197,12 @@ while getopts ':Xhc:p:' OPT; do
 		'p')
 			# we'll worry about this in phase3
 			;;
+		'P')
+			# we'll worry about this in phase3
+			;;
 		*)
-			die "Usage: $0 -X -c command -p print hostlist"
+			usage
+			die
 			;;
 	esac
 done
@@ -193,7 +212,7 @@ done
 ARGV=("$@")
 INDEX=$((OPTIND - 1))
 while [[ "${INDEX}" -lt $# ]]; do
-	if [[ "${ARGV[${INDEX}]}" =~ ^[a-Z0-9.-]+:[0-9]+$ ]]; then
+	if [[ "${ARGV[${INDEX}]}" =~ ^[A-Za-z0-9.-]+:[0-9]+$ ]]; then
 		HOSTS+=(${ARGV[${INDEX}]})
 	else
 		echo "[${ARGV[${INDEX}]}] is not in the form of <host>:<port>"
@@ -241,7 +260,7 @@ fi
 # and handling things that were ignored in phase1
 for HOST in ${HOSTS[@]}; do
 	OPTIND=1
-	while getopts ':Xhc:p:' OPT; do
+	while getopts ':Xhc:p:P:' OPT; do
 		case "${OPT}" in
 			'h')
 				# ignoring as it was already handled above
@@ -252,12 +271,20 @@ for HOST in ${HOSTS[@]}; do
 			'c')
 				get_socket "${HOST%%:*}" "${HOST##*:}"
 				redis_command "${RES}" "${OPTARG}"
+				RET=$?
+				[[ ${RET} -ne 0 ]] && continue
 				;;
 			'p')
-				echo "${HOST}: ${OUTPUT[${OPTARG}]}"
+				printf "%s: %s\n" "${HOST}" "${OUTPUT[${OPTARG}]}"
+				;;
+			'P')
+				KEY='RESULT'
+				[[ -n "${OPTARG}" ]] && KEY="${OPTARG}"
+				printf "%s\n" "${OUTPUT[${KEY}]}"
 				;;
 			*)
-				die "Usage: $0 -X -c command -p print hostlist"
+				usage
+				die
 		esac
 	done
 done
