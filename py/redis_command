@@ -4,27 +4,44 @@ import sys
 import getopt
 
 def usage():
-	usage_info = {
-		"-h": "Display this help page",
-		"-X": "Enable parallel mode",
-		"-c": "The command to send to redis instance",
-		"-p": "Output the result as 'hostport: result'",
-		"-f": "Output with formatting",
-	}
+	usage_info = [
+		("-h", "Display this help page"),
+		("-X", "Enable parallel mode"),
+		("-c", "The command to send to redis instance"),
+		("-p", "Output the result as 'hostport: result'"),
+		("-f", "Output with formatting"),
+	]
+	format_info = [
+		("host",     "The hostname we sent the request to"),
+		("port",     "The port we sent the request to"),
+		("hostport", "A concatenation of host:port"),
+		("reply",    "The reply to your request"),
+	]
 	print "Usage:"
 	print "\t%s [options] hostlist" % (sys.argv[0])
 	print
 	print "Options:"
-	for key in usage_info:
-		print "\t%-8s %s" % (key, usage_info[key])
+	for entry in usage_info:
+		print "\t%-8s %s" % (entry[0], entry[1])
 	print
 	print "Notes:"
 	print "\thostlist is a list of hostname:port separated by space"
 	print
+	print "Formatting:"
+	print "\tA format specifier looks like %{thing}"
+	print "\tThe following specifiers are always available:"
+	for entry in format_info:
+		print "\t\t%-16s: %s" % (entry[0], entry[1])
+	print
+	print "\tYou can also use any specifier that matches a key from the",
+	print "info command"
+	print
 	print "Examples:"
 	print "\t%s -c 'SET mykey Hello' -p localhost:6379" % (sys.argv[0])
 	print "\t%s -c 'GET mykey' -p localhost:6379" % (sys.argv[0])
-	print "\t%s -c info -f 'uptime_in_seconds' localhost:{6379..6400}" % \
+	print "\t%s -c info -f '%%{uptime_in_seconds}' localhost:{6379..6400}" % \
+	      (sys.argv[0])
+	print "\t%s -c info -f '%%{hostport}: %%{role}' localhost:{6379..6400}" % \
 	      (sys.argv[0])
 
 def main():
@@ -60,6 +77,21 @@ def main():
 		else:
 			print "[%s] is not in the form of <host>:<port>" % (host)
 
+	# make sure we have at least one host to work on
+	if len(hosts) < 1:
+		print "No hosts specified"
+		sys.exit(1)
+
+	# TODO: handle pre-connections here
+
+	# run the commands on each host
+	for host in hosts:
+		for o, a in opts:
+			# these were already dealt with
+			if o in ('-h', '-X'):
+				continue
+			if o == '-c':
+				
 
 if __name__ == "__main__":
 	main()
