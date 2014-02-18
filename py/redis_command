@@ -2,6 +2,7 @@
 import re
 import sys
 import getopt
+import socket
 
 def usage():
 	usage_info = [
@@ -15,7 +16,7 @@ def usage():
 		("host",     "The hostname we sent the request to"),
 		("port",     "The port we sent the request to"),
 		("hostport", "A concatenation of host:port"),
-		("reply",    "The reply to your request"),
+		("response", "The whole response to your request"),
 	]
 	print "Usage:"
 	print "\t%s [options] hostlist" % (sys.argv[0])
@@ -44,12 +45,39 @@ def usage():
 	print "\t%s -c info -f '%%{hostport}: %%{role}' localhost:{6379..6400}" % \
 	      (sys.argv[0])
 
+class RedisException(Exception):
+	pass
+
+def send_command(host, request, result_buffer):
+	# send the command and get the first byte, it tells us lots
+	s = socket.socket()
+	s.connect((host.split(":")[0], int(host.split(":")[1])))
+	s.sendall("%s\r\n" % (request))
+	response_type = s.recv(1)
+
+	# use the first byte to figure out what to do next
+	if response_type == "+":
+		result_buffer["response"] = s.recv(4096)
+		return
+	elif response_type == "-":
+		result_buffer["response"] = s.recv(4096)
+		RedisException()
+	elif response_type == "$":
+		
+		response_length = int(s.recv(4096))
+		print "The length is: %d" % (response_length)
+
+	s.close()
+
 def main():
-	options  = 'hXpc:f:'
+	options  = "hXpc:f:"
 	commands = 0
 	parallel = False
 	hosts = []
-	host_re = re.compile('^[A-Za-z0-9.-]+:[0-9]+$')
+	# re for hostname:port
+	host_re = re.compile(r"^[A-Za-z0-9.-]+:[0-9]+$")
+	# re for %{tagname}
+	tag_re = re.compile(r"%{([a-zA-Z0-9_-]+)}")
 
 	# first pass, find/process global options
 	try:
@@ -59,15 +87,15 @@ def main():
 		sys.exit(1)
 	for o, a in opts:
 		# we're not dealing w/ prints yet
-		if o in ('-p', '-f'):
+		if o in ("-p", "-f"):
 			continue
 		# for commands, just count them to decide on optimizations
-		if o == '-c':
+		if o == "-c":
 			commands += 1
-		if o == '-h':
+		if o == "-h":
 			usage()
 			sys.exit()
-		if o == '-X':
+		if o == "-X":
 			parallel = True
 
 	# next, let's put together a list of hosts
@@ -85,13 +113,34 @@ def main():
 	# TODO: handle pre-connections here
 
 	# run the commands on each host
+	result_buffer = {}
 	for host in hosts:
 		for o, a in opts:
+			# pre-populate result_buffer with always-available entries
+			result_buffer["host"] = host.split(":")[0]
+			result_buffer["port"] = host.split(":")[1]
+			result_buffer["hostport"] = host
+			result_buffer["response"] = ""
+
 			# these were already dealt with
-			if o in ('-h', '-X'):
+			if o in ("-h", "-X"):
 				continue
-			if o == '-c':
-				
+			# send a command
+			elif o == "-c":
+				send_command(host, a, result_buffer)
+			# print output
+			elif o == "-p":
+				print "%s: %s" % (host, result_buffer["response"])
+			# print output with formatting
+			elif o == "-f":
+				try:
+					print re.sub(tag_re, lambda m: result_buffer[m.group(1)], a)
+				except KeyError:
+					print "Invalid format string!"
+					sys.exit(1)
+
+			# after each command, we clear the buffer
+			result_buffer.clear()
 
 if __name__ == "__main__":
 	main()
