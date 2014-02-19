@@ -72,10 +72,15 @@ def send_command(host, request, result_buffer):
 
 		# read the rest of the bytes, but account for the fact that we already
 		# got len(response_head) bytes!  the \r\n is still there too, so skip it
-		print "adding to response"
 		result_buffer["response"] = response_head[index+2:] + \
 		                            s.recv(response_length)
-		print result_buffer["response"]
+
+		# this might be able to go into a separate function later, but for now
+		# the only special case we have is the 'info' command
+		if request == "info":
+			for line in result_buffer["response"].split("\r\n"):
+				if len(line) > 0 and line[0] != "#":
+					result_buffer[line.split(":")[0]] = line.split(":")[1]
 
 	s.close()
 
@@ -125,23 +130,21 @@ def main():
 	# run the commands on each host
 	result_buffer = {}
 	for host in hosts:
-		for o, a in opts:
-			# pre-populate result_buffer with always-available entries
-			result_buffer["host"] = host.split(":")[0]
-			result_buffer["port"] = host.split(":")[1]
-			result_buffer["hostport"] = host
-			result_buffer["response"] = ""
+		# pre-populate result_buffer with always-available entries
+		result_buffer["host"] = host.split(":")[0]
+		result_buffer["port"] = host.split(":")[1]
+		result_buffer["hostport"] = host
+		result_buffer["response"] = ""
 
+		for o, a in opts:
 			# these were already dealt with
 			if o in ("-h", "-X"):
 				continue
 			# send a command
 			elif o == "-c":
-				print "command send..."
 				send_command(host, a, result_buffer)
 			# print output
 			elif o == "-p":
-				print "printing response"
 				print "%s: %s" % (host, result_buffer["response"])
 			# print output with formatting
 			elif o == "-f":
@@ -151,8 +154,8 @@ def main():
 					print "Invalid format string!"
 					sys.exit(1)
 
-			# after each command, we clear the buffer
-			result_buffer.clear()
+		# after each host, we clear the buffer
+		result_buffer.clear()
 
 if __name__ == "__main__":
 	main()
