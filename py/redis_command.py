@@ -75,6 +75,7 @@ def send_command(host, request, result_buffer):
 		print "adding to response"
 		result_buffer["response"] = response_head[index+2:] + \
 		                            s.recv(response_length)
+		print result_buffer["response"]
 
 	s.close()
 
