@@ -97,7 +97,7 @@ def main():
 	# first pass, find/process global options
 	try:
 		opts, args = getopt.getopt(sys.argv[1:], options)
-	except getopt.GetoptError as e:
+	except getopt.GetoptError:
 		usage()
 		sys.exit(1)
 	for o, a in opts:
