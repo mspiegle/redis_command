@@ -59,12 +59,18 @@ def send_command(host, request, result_buffer):
 	response_head = s.recv(128)
 
 	# use the first byte to figure out what to do next
-	if response_head[0] == "+":
-		result_buffer["response"] = s.recv(4096)
-		return
-	elif response_head[0] == "-":
-		result_buffer["response"] = s.recv(4096)
-		RedisException()
+	if response_head[0] in ["+", "-"]:
+		# add the response_head to the response
+		result_buffer["response"] += response_head
+
+		# if there's no terminating \r\n, we need more data
+		if -1 == result_buffer["response"].rfind("\r\n"):
+			result_buffer["response"] += s.recv(4096)
+
+		# account for errors
+		if response_head[0] == "-":
+			raise RedisException()
+
 	elif response_head[0] == "$":
 		# figure out the size of the response by looking at the next few bytes
 		index = response_head.find("\r\n", 1)
@@ -142,7 +148,12 @@ def main():
 				continue
 			# send a command
 			elif o == "-c":
-				send_command(host, a, result_buffer)
+				try:
+					send_command(host, a, result_buffer)
+				except RedisException:
+					print "%s: Invalid command" % (host)
+					result_buffer.clear()
+					break
 			# print output
 			elif o == "-p":
 				print "%s: %s" % (host, result_buffer["response"])
