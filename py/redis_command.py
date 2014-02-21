@@ -51,7 +51,11 @@ class RedisException(Exception):
 def send_command(host, request, result_buffer):
 	# send the command and get a response
 	s = socket.socket()
-	s.connect((host.split(":")[0], int(host.split(":")[1])))
+	try:
+		s.connect((host.split(":")[0], int(host.split(":")[1])))
+	except socket.error:
+		raise RedisException()
+
 	s.sendall("%s\r\n" % (request))
 
 	# we're going to pull a few bytes off the wire, the first byte is
@@ -71,6 +75,8 @@ def send_command(host, request, result_buffer):
 		if response_head[0] == "-":
 			raise RedisException()
 
+		result_buffer["response"] = result_buffer["response"].strip()
+
 	elif response_head[0] == "$":
 		# figure out the size of the response by looking at the next few bytes
 		index = response_head.find("\r\n", 1)
@@ -88,6 +94,7 @@ def send_command(host, request, result_buffer):
 				if len(line) > 0 and line[0] != "#":
 					result_buffer[line.split(":")[0]] = line.split(":")[1]
 
+		result_buffer["response"] = result_buffer["response"].strip()
 	s.close()
 
 def main():
@@ -151,7 +158,7 @@ def main():
 				try:
 					send_command(host, a, result_buffer)
 				except RedisException:
-					print "%s: Invalid command" % (host)
+					print "%s: Redis Error" % (host)
 					result_buffer.clear()
 					break
 			# print output
